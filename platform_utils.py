@@ -188,4 +188,6 @@ def git_sync(data_file: Path) -> str:
     r = run("push", timeout=120)
     if r.returncode != 0:
         return f"{msg}, но push не прошёл: " + r.stderr.strip()[-200:]
+    if msg.startswith("Изменений"):
+        return "☁ Изменений нет — на GitHub всё актуально."
     return f"☁ {msg} и отправлены на GitHub."
