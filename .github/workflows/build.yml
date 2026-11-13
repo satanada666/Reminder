@@ -25,6 +25,9 @@ jobs:
           - os: macos-15-intel
             artifact: Napominalka-macos-intel
     runs-on: ${{ matrix.os }}
+    env:
+      PYTHONUTF8: "1"            # русский вывод в консоли Windows-раннера (cp1252)
+      PYTHONIOENCODING: utf-8
     steps:
       - uses: actions/checkout@v4
 
