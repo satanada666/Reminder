@@ -1,0 +1,109 @@
+name: Сборка (Windows / Linux / macOS)
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+    paths-ignore: ["data/**", "**.md"]   # коммиты задач не запускают сборку
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: Napominalka-windows
+          - os: ubuntu-22.04
+            artifact: Napominalka-linux-x64
+          - os: macos-latest
+            artifact: Napominalka-macos-arm64
+          - os: macos-15-intel
+            artifact: Napominalka-macos-intel
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Системные библиотеки (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-tk libportaudio2 flac libayatana-appindicator3-1 xvfb
+
+      - name: Зависимости
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Тесты логики
+        run: python test_core.py
+
+      - name: Сборка
+        run: pyinstaller --noconfirm napominalka.spec
+
+      - name: Самопроверка (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          NAPOMINALKA_DATA: ${{ runner.temp }}/selftest
+        run: |
+          $p = Start-Process dist/Napominalka.exe -ArgumentList "--selftest" -PassThru -Wait
+          Get-Content "$env:NAPOMINALKA_DATA/selftest.txt"
+          if ($p.ExitCode -ne 0) { Write-Host "::warning::selftest exit $($p.ExitCode)" }
+
+      - name: Самопроверка (Linux)
+        if: runner.os == 'Linux'
+        env:
+          NAPOMINALKA_DATA: ${{ runner.temp }}/selftest
+        run: xvfb-run ./dist/Napominalka --selftest || echo "::warning::selftest failed (на CI нет микрофона)"
+
+      - name: Самопроверка (macOS)
+        if: runner.os == 'macOS'
+        env:
+          NAPOMINALKA_DATA: ${{ runner.temp }}/selftest
+        run: ./dist/Napominalka.app/Contents/MacOS/Napominalka --selftest || echo "::warning::selftest failed (на CI нет микрофона)"
+
+      - name: Упаковка (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path dist/Napominalka.exe, README.md -DestinationPath ${{ matrix.artifact }}.zip
+
+      - name: Упаковка (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          chmod +x dist/Napominalka
+          tar -czf ${{ matrix.artifact }}.tar.gz -C dist Napominalka -C .. README.md
+
+      - name: Упаковка (macOS)
+        if: runner.os == 'macOS'
+        run: ditto -c -k --keepParent dist/Napominalka.app ${{ matrix.artifact }}.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            ${{ matrix.artifact }}.zip
+            ${{ matrix.artifact }}.tar.gz
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: out/*
+          generate_release_notes: true

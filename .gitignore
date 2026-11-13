@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.tmp
+build/
+dist/
+build_assets/
+# служебное из data/ — в git идут только задачи (data/tasks.json)
+data/*.log
+data/settings.json
+data/selftest.txt
+data/icon.*

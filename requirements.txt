@@ -1,7 +1,7 @@
+customtkinter
 SpeechRecognition
 sounddevice
 numpy
 pystray
 Pillow
-winotify
-customtkinter
+winotify; sys_platform == "win32"

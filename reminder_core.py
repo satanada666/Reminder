@@ -16,8 +16,32 @@ INTERVAL_OVERDUE = timedelta(hours=1)      # просрочено — тоже �
 QUIET_FROM = 23                            # тихие часы: с 23:00 ...
 QUIET_TO = 7                               # ... до 07:00 напоминаний нет
 
-DATA_DIR = Path(os.environ.get("APPDATA", Path.home())) / "Napominalka"
+APP_DIR = Path(__file__).resolve().parent
+
+
+def _user_data_dir() -> Path:
+    import sys
+    if sys.platform.startswith("win"):
+        return Path(os.environ.get("APPDATA", Path.home())) / "Napominalka"
+    if sys.platform == "darwin":
+        return Path.home() / "Library/Application Support/Napominalka"
+    return Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) / "napominalka"
+
+
+# Из исходников задачи лежат в папке проекта (data/), чтобы их коммитить в git.
+# Собранный exe/app хранит их в папке пользователя ОС.
+# Переменная NAPOMINALKA_DATA задаёт любую другую папку (нужно для тестов).
+if os.environ.get("NAPOMINALKA_DATA"):
+    DATA_DIR = Path(os.environ["NAPOMINALKA_DATA"])
+elif getattr(__import__("sys"), "frozen", False):
+    DATA_DIR = _user_data_dir()
+else:
+    DATA_DIR = APP_DIR / "data"
 DATA_FILE = DATA_DIR / "tasks.json"
+_OLD_DATA_FILE = Path(os.environ.get("APPDATA", Path.home())) / "Napominalka" / "tasks.json"
+if "NAPOMINALKA_DATA" not in os.environ and not DATA_FILE.exists() and _OLD_DATA_FILE.exists():
+    DATA_DIR.mkdir(parents=True, exist_ok=True)       # перенос со старого места
+    DATA_FILE.write_bytes(_OLD_DATA_FILE.read_bytes())
 
 
 # ---------------------------------------------------------------- модель

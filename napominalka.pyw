@@ -1,29 +1,26 @@
-"""Напоминалка для Windows: задачи текстом или голосом, напоминания за день (раз в 6 ч)
-и в день срока (каждый час). Запуск: pythonw napominalka.pyw  [--hidden]"""
+"""Напоминалка (Windows / Linux / macOS): задачи текстом или голосом, напоминания за день
+(раз в 6 ч) и в день срока (каждый час). Запуск: pythonw napominalka.pyw  [--hidden]"""
 from __future__ import annotations
 
-import ctypes
 import json
 import logging
 import queue
 import sys
 import threading
 import tkinter as tk
-import winsound
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import customtkinter as ctk
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import platform_utils as pu  # noqa: E402
 import reminder_core as core  # noqa: E402
 
 APP_NAME = "Напоминалка"
 CHECK_EVERY_MS = 30_000
-STARTUP_VBS = (Path(core.os.environ["APPDATA"]) / r"Microsoft\Windows\Start Menu\Programs\Startup"
-               / "Napominalka.vbs")
 SETTINGS_FILE = core.DATA_DIR / "settings.json"
-ICON_FILE = core.DATA_DIR / "icon.ico"
+ICON_FILE = core.DATA_DIR / ("icon.ico" if pu.IS_WIN else "icon.png")
 
 core.DATA_DIR.mkdir(parents=True, exist_ok=True)
 logging.basicConfig(filename=core.DATA_DIR / "napominalka.log", level=logging.INFO,
@@ -38,16 +35,16 @@ try:
 except Exception:  # pragma: no cover
     HAVE_VOICE = False
 try:
+    # на macOS трей pystray конфликтует с главным циклом Tk — там сворачиваемся в Dock
+    if sys.platform == "darwin":
+        raise ImportError
     import pystray
     HAVE_TRAY = True
 except Exception:  # pragma: no cover
     HAVE_TRAY = False
-try:
-    from winotify import Notification, audio
-    HAVE_TOAST = True
-except Exception:  # pragma: no cover
-    HAVE_TOAST = False
-from PIL import Image, ImageDraw
+from PIL import ImageTk
+
+from icon_art import make_icon
 
 # ====================================================================== палитра (светлая, тёмная)
 BG = ("#F2F3F7", "#15161B")
@@ -80,11 +77,6 @@ MONTHS_GEN = ["января", "февраля", "марта", "апреля", "�
 WEEKDAYS = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
 
 
-def single_instance() -> bool:
-    ctypes.windll.kernel32.CreateMutexW(None, False, "Global\\NapominalkaMutex_v1")
-    return ctypes.windll.kernel32.GetLastError() != 183  # ERROR_ALREADY_EXISTS
-
-
 def load_settings() -> dict:
     try:
         return json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
@@ -98,21 +90,6 @@ def save_settings(s: dict):
 
 def pretty_date(d: date) -> str:
     return f"{d.day} {MONTHS_GEN[d.month - 1]}" + ("" if d.year == date.today().year else f" {d.year}")
-
-
-def make_icon(size: int = 256) -> Image.Image:
-    """Колокольчик на скруглённом синем квадрате."""
-    s = size
-    img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    d.rounded_rectangle((0, 0, s - 1, s - 1), radius=s // 4, fill=(79, 107, 255))
-    w = (255, 255, 255)
-    d.ellipse((s * .30, s * .20, s * .70, s * .60), fill=w)            # купол
-    d.rectangle((s * .30, s * .40, s * .70, s * .66), fill=w)          # тело
-    d.rounded_rectangle((s * .22, s * .62, s * .78, s * .70), radius=s * .04, fill=w)  # юбка
-    d.ellipse((s * .44, s * .70, s * .56, s * .82), fill=w)            # язычок
-    d.ellipse((s * .46, s * .13, s * .54, s * .21), fill=w)            # ушко
-    return img
 
 
 def mode_idx() -> int:
@@ -198,8 +175,21 @@ class ReminderPopup(tk.Toplevel):
         rgb = [int(BORDER[mi][i:i + 2], 16) for i in (1, 3, 5)]
         key = "#%02x%02x%02x" % (rgb[0], rgb[1], rgb[2] + 1 if rgb[2] < 255 else 254)
         self.overrideredirect(True)
-        self.configure(bg=key)
-        self.attributes("-transparentcolor", key, "-topmost", True, "-alpha", 0.0)
+        self.attributes("-topmost", True)
+        if pu.IS_WIN:      # настоящие прозрачные скруглённые углы
+            self.configure(bg=key)
+            self.attributes("-transparentcolor", key, "-alpha", 0.0)
+        elif pu.IS_MAC:
+            key = "systemTransparent"
+            self.configure(bg=key)
+            self.attributes("-transparent", True, "-alpha", 0.0)
+        else:              # Linux: прозрачность зависит от композитора — фон под цвет рамки
+            key = BORDER[mi]
+            self.configure(bg=key)
+            try:
+                self.attributes("-alpha", 0.0)
+            except tk.TclError:
+                pass
 
         color, pill_bg = STATUS_STYLE[st]
         f = app.fonts
@@ -299,8 +289,15 @@ class App:
         self.root.minsize(600, 520)
         try:
             if not ICON_FILE.exists():
-                make_icon().save(ICON_FILE, sizes=[(16, 16), (32, 32), (48, 48), (256, 256)])
-            self.root.iconbitmap(str(ICON_FILE))
+                if pu.IS_WIN:
+                    make_icon().save(ICON_FILE, sizes=[(16, 16), (32, 32), (48, 48), (256, 256)])
+                else:
+                    make_icon(256).save(ICON_FILE)
+            if pu.IS_WIN:
+                self.root.iconbitmap(str(ICON_FILE))
+            else:
+                self._icon_img = ImageTk.PhotoImage(make_icon(128))
+                self.root.iconphoto(True, self._icon_img)
         except Exception:
             log.exception("icon")
 
@@ -323,11 +320,12 @@ class App:
         self._build_ui()
         self.render_list(force=True)
 
-        self.root.protocol("WM_DELETE_WINDOW", self.hide_window if HAVE_TRAY else self.quit)
+        # крестик не закрывает программу — иначе напоминания перестанут приходить
+        self.root.protocol("WM_DELETE_WINDOW", self.hide_window)
         if HAVE_TRAY:
             self._start_tray()
-        if start_hidden and HAVE_TRAY:
-            self.root.withdraw()
+        if start_hidden:
+            self.hide_window()
 
         self.root.after(800, self.check_reminders)
         self.root.after(100, self._drain_queue)
@@ -415,11 +413,23 @@ class App:
         # низ
         foot = ctk.CTkFrame(self.root, fg_color="transparent")
         foot.pack(fill="x", padx=pad, pady=(6, 14))
-        self.autostart = tk.BooleanVar(value=STARTUP_VBS.exists())
-        ctk.CTkSwitch(foot, text="Запускать вместе с Windows", variable=self.autostart, font=f["small"],
+        self.autostart = tk.BooleanVar(value=pu.autostart_enabled())
+        os_name = "Windows" if pu.IS_WIN else ("macOS" if pu.IS_MAC else "системой")
+        ctk.CTkSwitch(foot, text=f"Запускать вместе с {os_name}", variable=self.autostart, font=f["small"],
                       text_color=TEXT, progress_color=ACCENT, command=self.toggle_autostart).pack(side="left")
         ctk.CTkLabel(foot, text=f"Тихие часы {core.QUIET_FROM}:00–{core.QUIET_TO:02d}:00",
                      font=f["meta"], text_color=MUTED).pack(side="right")
+        if not HAVE_TRAY:  # без трея нужен явный выход
+            ctk.CTkButton(foot, text="Выйти", width=70, height=30, corner_radius=10, font=f["small"],
+                          fg_color="transparent", hover_color=GHOST_HOVER, text_color=MUTED,
+                          command=self.quit).pack(side="right", padx=(8, 0))
+        # кнопка синхронизации — только если задачи лежат в git-репозитории
+        if pu.git_root(core.DATA_DIR):
+            self.sync_btn = ctk.CTkButton(
+                foot, text="☁  Сохранить в GitHub", height=30, corner_radius=10, font=f["small"],
+                fg_color=FIELD, hover_color=GHOST_HOVER, text_color=TEXT, border_width=1,
+                border_color=BORDER, command=self.sync_github)
+            self.sync_btn.pack(side="right", padx=12)
         self.entry.focus_set()
 
     def set_status(self, text: str):
@@ -564,18 +574,24 @@ class App:
 
     def toggle_autostart(self):
         try:
-            if self.autostart.get():
-                pyw = Path(sys.executable).with_name("pythonw.exe")
-                script = Path(__file__).resolve()
-                STARTUP_VBS.write_text(
-                    'CreateObject("WScript.Shell").Run """{}"" ""{}"" --hidden", 0, False\r\n'.format(pyw, script),
-                    encoding="utf-16")
-                self.set_status("Автозапуск включён.")
-            else:
-                STARTUP_VBS.unlink(missing_ok=True)
-                self.set_status("Автозапуск выключен.")
+            pu.set_autostart(self.autostart.get())
+            self.set_status("Автозапуск включён." if self.autostart.get() else "Автозапуск выключен.")
         except OSError as e:
             self.set_status(f"⚠ Автозапуск: {e}")
+
+    def sync_github(self):
+        self.sync_btn.configure(state="disabled", text="☁  Отправляю…")
+        self.set_status("Коммичу задачи и отправляю на GitHub…")
+
+        def work():
+            try:
+                res = pu.git_sync(core.DATA_FILE)
+            except Exception as e:
+                log.exception("git sync")
+                res = f"⚠ Ошибка синхронизации: {e}"
+            self.ui_queue.put(("sync_done", res))
+
+        threading.Thread(target=work, daemon=True).start()
 
     # ------------------------------------------------------------------ голос
     def toggle_voice(self):
@@ -645,31 +661,32 @@ class App:
         self.root.after(CHECK_EVERY_MS, self.check_reminders)
 
     def notify(self, t: core.Task, st: str):
-        if HAVE_TOAST:
-            try:
-                n = Notification(app_id=APP_NAME, title=POPUP_TITLE[st].capitalize(),
-                                 msg=f"{t.text}\nСрок: {pretty_date(t.due_date)}", duration="short",
-                                 icon=str(ICON_FILE) if ICON_FILE.exists() else "")
-                n.set_audio(audio.Reminder, loop=False)
-                n.show()
-            except Exception:
-                log.exception("toast")
-                winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
-        else:
-            winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+        if not pu.toast(APP_NAME, POPUP_TITLE[st].capitalize(),
+                        f"{t.text}\nСрок: {pretty_date(t.due_date)}",
+                        icon=str(ICON_FILE) if ICON_FILE.exists() else ""):
+            pu.beep()
         self.open_popups[t.id] = ReminderPopup(self, t, st, slot=len(self.open_popups))
 
     # ------------------------------------------------------------------ трей
-    def _start_tray(self):
-        menu = pystray.Menu(
-            pystray.MenuItem("Открыть", lambda: self.ui_queue.put(("show", None)), default=True),
-            pystray.MenuItem("Выход", lambda: self.ui_queue.put(("quit", None))),
-        )
-        self.tray = pystray.Icon("napominalka", make_icon(64), APP_NAME, menu)
-        self.tray.run_detached()
+    def _start_tray(self) -> bool:
+        try:
+            menu = pystray.Menu(
+                pystray.MenuItem("Открыть", lambda: self.ui_queue.put(("show", None)), default=True),
+                pystray.MenuItem("Выход", lambda: self.ui_queue.put(("quit", None))),
+            )
+            self.tray = pystray.Icon("napominalka", make_icon(64), APP_NAME, menu)
+            self.tray.run_detached()
+            return True
+        except Exception:
+            log.exception("tray")
+            self.tray = None
+            return False
 
     def hide_window(self):
-        self.root.withdraw()
+        if self.tray:
+            self.root.withdraw()
+        else:              # нет трея (macOS / Linux без индикаторов) — сворачиваем в Dock/панель
+            self.root.iconify()
 
     def show_window(self):
         self.root.deiconify()
@@ -693,6 +710,9 @@ class App:
                     return
                 elif kind.startswith("voice"):
                     self._on_voice(kind, payload)
+                elif kind == "sync_done":
+                    self.sync_btn.configure(state="normal", text="☁  Сохранить в GitHub")
+                    self.set_status(payload)
         except queue.Empty:
             pass
         self.root.after(100, self._drain_queue)
@@ -701,9 +721,42 @@ class App:
         self.root.mainloop()
 
 
+def selftest() -> int:
+    """Проверка сборки без окна: python napominalka.pyw --selftest  (итог в data/selftest.txt)."""
+    lines, ok = [], True
+
+    def check(name, fn):
+        nonlocal ok
+        try:
+            lines.append(f"OK   {name}: {fn()}")
+        except Exception as e:
+            ok = False
+            lines.append(f"FAIL {name}: {type(e).__name__}: {e}")
+
+    check("platform", lambda: sys.platform)
+    check("data_dir", lambda: core.DATA_DIR)
+    check("customtkinter", lambda: ctk.__version__)
+    check("date_parser", lambda: core.extract_date("отчёт завтра")[0])
+    check("voice_libs", lambda: HAVE_VOICE or (_ for _ in ()).throw(RuntimeError("not available")))
+    check("flac_encoder", lambda: len(sr.AudioData(b"\0\0" * 16000, 16000, 2).get_flac_data()))
+    check("audio_devices", lambda: len(sd.query_devices()))
+    check("tray_lib", lambda: HAVE_TRAY)
+    check("icon", lambda: make_icon(64).size)
+    text = "\n".join(lines)
+    core.DATA_DIR.mkdir(parents=True, exist_ok=True)
+    (core.DATA_DIR / "selftest.txt").write_text(text + "\n", encoding="utf-8")
+    try:
+        print(text)
+    except Exception:
+        pass
+    return 0 if ok else 1
+
+
 def main():
-    if not single_instance():
-        ctypes.windll.user32.MessageBoxW(None, "Напоминалка уже запущена (значок в трее).", APP_NAME, 0x40)
+    if "--selftest" in sys.argv:
+        sys.exit(selftest())
+    if not pu.single_instance():
+        pu.show_error_box(APP_NAME, "Напоминалка уже запущена (значок в трее).")
         return
     App(start_hidden="--hidden" in sys.argv).run()
 
