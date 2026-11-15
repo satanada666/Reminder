@@ -8,6 +8,7 @@ import queue
 import sys
 import threading
 import tkinter as tk
+from tkinter import messagebox
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -318,6 +319,7 @@ class App:
             "popup_title": ctk.CTkFont("Segoe UI", 17, "bold"),
         }
         self._build_ui()
+        self._install_clipboard_fixes()
         self.render_list(force=True)
 
         # крестик не закрывает программу — иначе напоминания перестанут приходить
@@ -454,6 +456,82 @@ class App:
             self.date_var.set(d.strftime("%d.%m.%Y"))
             self.quick.set("")
 
+    # ------------------------------------------------------------------ буфер обмена
+    # Tk ловит Ctrl+V по символу клавиши, а на русской раскладке это «м» — и вставка молчит.
+    _CYR_KEYS = {"cyrillic_es": "<<Copy>>", "cyrillic_em": "<<Paste>>", "cyrillic_che": "<<Cut>>",
+                 "cyrillic_ef": "<<SelectAll>>"}
+    _WIN_KEYCODES = {67: "<<Copy>>", 86: "<<Paste>>", 88: "<<Cut>>", 65: "<<SelectAll>>"}
+
+    def _install_clipboard_fixes(self):
+        self.root.bind_all("<Control-KeyPress>", self._ctrl_key, add="+")
+        for btn in (("<Button-2>", "<Button-3>") if pu.IS_MAC else ("<Button-3>",)):
+            self.root.bind_class("Entry", btn, self._entry_menu, add="+")
+        self.entry.bind("<<Paste>>", self._paste_main)
+
+    def _ctrl_key(self, e):
+        w = e.widget
+        if not isinstance(w, tk.Entry) or e.keysym.lower() in ("a", "c", "v", "x", "z"):
+            return None  # латиница — Tk справится сам
+        ev = self._CYR_KEYS.get(e.keysym.lower())
+        if ev is None and pu.IS_WIN:
+            ev = self._WIN_KEYCODES.get(e.keycode)
+        if ev is None:
+            return None
+        if ev == "<<SelectAll>>":
+            w.select_range(0, "end"); w.icursor("end")
+        else:
+            w.event_generate(ev)
+        return "break"
+
+    def _entry_menu(self, e):
+        w = e.widget
+        w.focus_set()
+        m = tk.Menu(self.root, tearoff=0)
+        for label, ev in (("Вырезать", "<<Cut>>"), ("Копировать", "<<Copy>>"), ("Вставить", "<<Paste>>")):
+            m.add_command(label=label, command=lambda ev=ev: w.event_generate(ev))
+        m.add_separator()
+        m.add_command(label="Выделить всё", command=lambda: (w.select_range(0, "end"), w.icursor("end")))
+        try:
+            m.tk_popup(e.x_root, e.y_root)
+        finally:
+            m.grab_release()
+        return "break"
+
+    def _paste_main(self, e):
+        """Вставка в поле задачи: переводы строк -> пробелы; список задач со сроками -> предложить
+        добавить каждую отдельно."""
+        try:
+            txt = self.root.clipboard_get()
+        except tk.TclError:
+            return "break"
+        if "\n" in txt.strip():
+            items = core.split_pasted_tasks(txt)
+            if len(items) >= 2:
+                preview = "\n".join(
+                    f"• {pretty_date(d)} — {t if len(t) <= 70 else t[:67] + '…'}" for d, t in items[:8])
+                if len(items) > 8:
+                    preview += f"\n… и ещё {len(items) - 8}"
+                ans = messagebox.askyesnocancel(
+                    APP_NAME, f"Во вставленном тексте задач со сроками: {len(items)}\n\n{preview}\n\n"
+                              "Да — добавить каждую отдельной задачей\nНет — вставить в поле одной строкой",
+                    parent=self.root)
+                if ans is None:
+                    return "break"
+                if ans:
+                    for d, t in items:
+                        self.store.add(t, d)
+                        log.info("добавлена задача (вставка списком): %s до %s", t, d)
+                    self._after_add(f"✓ Добавлено задач из вставки: {len(items)}")
+                    return "break"
+        w = e.widget
+        try:
+            w.delete("sel.first", "sel.last")
+        except tk.TclError:
+            pass
+        w.insert("insert", " ".join(txt.split()))
+        self._autodate()
+        return "break"
+
     def render_list(self, force: bool = False):
         today = date.today()
         tasks = sorted(self.store.tasks, key=lambda t: (t.done, t.due))
@@ -500,10 +578,13 @@ class App:
         raw = raw[:1].upper() + raw[1:]
         t = self.store.add(raw, due)
         log.info("добавлена задача %s: %s до %s", t.id, t.text, t.due)
+        self._after_add(f"✓ Добавлено: «{t.text}» — {pretty_date(due)} ({core.human_left(t, date.today())})")
+
+    def _after_add(self, status: str):
         self.entry.delete(0, "end"); self.root.focus(); self.entry.focus_set()
         self.date_var.set((date.today() + timedelta(days=1)).strftime("%d.%m.%Y"))
         self.quick.set("Завтра")
-        self.set_status(f"✓ Добавлено: «{t.text}» — {pretty_date(due)} ({core.human_left(t, date.today())})")
+        self.set_status(status)
         if self.filter == "Выполненные":
             self.filter_seg.set("Активные")
             self.filter = "Активные"

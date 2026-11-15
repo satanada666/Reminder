@@ -177,9 +177,12 @@ def _future(d_day: int, d_month: int, year: int | None, today: date) -> date:
     return cand if cand >= today else date(today.year + 1, d_month, d_day)
 
 
-def extract_date(text: str, today: date | None = None) -> tuple[date | None, str]:
+def extract_date(text: str, today: date | None = None,
+                 earliest: bool = False) -> tuple[date | None, str]:
     """Ищет в тексте дату ('завтра', '20 ноября', '15.11', 'в пятницу', 'через 3 дня').
-    Возвращает (дата или None, текст без найденной фразы)."""
+    Возвращает (дата или None, текст без найденной фразы).
+    earliest=True — берётся дата, стоящая ближе всего к началу текста (для вставки списков,
+    где в описании могут встречаться другие даты)."""
     today = today or date.today()
     patterns: list[tuple[str, callable]] = [
         (_PREP + r"\bпослезавтра\b", lambda m: today + timedelta(days=2)),
@@ -201,10 +204,12 @@ def extract_date(text: str, today: date | None = None) -> tuple[date | None, str
         patterns.append((_PREP + r"\b" + wd_re + r"\b",
                          lambda m, wd=wd: today + timedelta(days=((wd - today.weekday()) % 7) or 7)))
 
-    for pat, fn in patterns:
+    hits = []
+    for i, (pat, fn) in enumerate(patterns):
         m = re.search(pat, text, flags=re.IGNORECASE)
-        if not m:
-            continue
+        if m:
+            hits.append((m.start() if earliest else i, m, fn))
+    for _, m, fn in sorted(hits, key=lambda h: h[0]):
         try:
             d = fn(m)
         except ValueError:
@@ -213,6 +218,37 @@ def extract_date(text: str, today: date | None = None) -> tuple[date | None, str
         rest = re.sub(r"\s{2,}", " ", rest).strip(" ,.-")
         return d, rest
     return None, text.strip()
+
+
+_LIST_MARK = re.compile(r"^\s*(?:\d{1,2}[.)]\s+|[-•*–—]\s*)")
+_WD_ABBR = re.compile(r"^\s*(?:пн|вт|ср|чт|пт|сб|вс)\b\.?\s*[,:]?\s*", re.IGNORECASE)
+
+
+def split_pasted_tasks(text: str, today: date | None = None) -> list[tuple[date, str]]:
+    """Вставленный многострочный текст -> список (срок, задача).
+    Каждая строка с датой — новая задача; строки без даты дописываются к предыдущей.
+    Нумерация «1.», маркеры «-», сокращения «Пн,» убираются."""
+    today = today or date.today()
+    out: list[list] = []
+    orphan: list[str] = []  # строки без даты до первой датированной
+    for line in text.splitlines():
+        line = _LIST_MARK.sub("", line).strip()
+        if not line:
+            continue
+        d, rest = extract_date(line, today, earliest=True)
+        if d is None:
+            (out[-1][1].append(line) if out else orphan.append(line))
+            continue
+        rest = _WD_ABBR.sub("", rest).strip(" ,:;.-—")
+        out.append([d, [rest] if rest else []])
+    if out and orphan:
+        out[0][1] = orphan + out[0][1]
+    res = []
+    for d, parts in out:
+        t = " ".join(parts).strip()
+        if t:
+            res.append((d, t[:1].upper() + t[1:]))
+    return res
 
 
 def parse_user_date(s: str, today: date | None = None) -> date:

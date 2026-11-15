@@ -69,7 +69,20 @@ def test_store(tmp=None):
     assert core.TaskStore(p).tasks == []
 
 
+def test_paste_split():
+    txt = ("Пн, 16 ноября: «Напомнить АСУ про отклик». Звонил 12.11, ждать 1–2 дня.\n"
+           "Заодно пройтись по откликам.\n\n"
+           "1. Вт, 17 ноября: «АСУ: вакансия ПЛК». Уточнить ТК.\n"
+           "2. Ср, 18 ноября: «Bitrix24: напомнить Куклиной».\n")
+    r = core.split_pasted_tasks(txt, TODAY)
+    assert [x[0] for x in r] == [date(2026, 11, 16), date(2026, 11, 17), date(2026, 11, 18)], r
+    assert r[0][1].startswith("«Напомнить АСУ") and r[0][1].endswith("по откликам."), r[0]
+    assert r[1][1] == "«АСУ: вакансия ПЛК». Уточнить ТК", r[1]
+    assert core.split_pasted_tasks("просто текст\nещё строка", TODAY) == []
+
+
 if __name__ == "__main__":
+    test_paste_split()
     test_dates()
     test_schedule()
     test_store()
