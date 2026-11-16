@@ -152,7 +152,8 @@ class TaskCard(ctk.CTkFrame):
 
         tools = ctk.CTkFrame(self, fg_color="transparent")
         tools.grid(row=0, column=4, rowspan=2, padx=(0, 10))
-        for sym, tip, cmd in (("⟲", "Перенести срок", lambda: app.change_due(t.id)),
+        for sym, tip, cmd in (("✎", "Изменить текст", lambda: app.edit_task(t.id, "text")),
+                              ("📅", "Перенести срок", lambda: app.edit_task(t.id, "date")),
                               ("✕", "Удалить", lambda: app.delete_task(t.id))):
             ctk.CTkButton(tools, text=sym, width=32, height=32, corner_radius=10, font=fonts["tool"],
                           fg_color="transparent", hover_color=GHOST_HOVER, text_color=MUTED,
@@ -162,9 +163,111 @@ class TaskCard(ctk.CTkFrame):
         for w in (self, title):
             w.bind("<Enter>", lambda e: self.configure(fg_color=CARD_HOVER))
             w.bind("<Leave>", lambda e: self.configure(fg_color=CARD))
+            w.bind("<Double-Button-1>", lambda e: app.edit_task(t.id, "text"))
 
 
 # ====================================================================== всплывающее напоминание
+class EditDialog(ctk.CTkToplevel):
+    """Окно «Изменить задачу»: текст + срок с быстрыми кнопками."""
+    QUICK = (("Сегодня", 0), ("Завтра", 1), ("+3 дня", 3), ("Неделя", 7), ("Месяц", 30))
+
+    def __init__(self, app: "App", t: core.Task, focus: str = "date"):
+        super().__init__(app.root)
+        self.app, self.t = app, t
+        f = app.fonts
+        self.title("Изменить задачу")
+        self.configure(fg_color=BG)
+        self.resizable(False, False)
+        self.attributes("-topmost", True)  # поверх всплывающих напоминаний
+        if app.root.winfo_viewable():
+            self.transient(app.root)
+
+        box = ctk.CTkFrame(self, corner_radius=18, fg_color=CARD, border_width=1, border_color=BORDER)
+        box.pack(fill="both", expand=True, padx=16, pady=16)
+        ctk.CTkLabel(box, text="Задача", font=f["small"], text_color=MUTED).pack(anchor="w", padx=16, pady=(14, 4))
+        self.text = ctk.CTkTextbox(box, width=440, height=110, corner_radius=12, font=f["task"], wrap="word",
+                                   fg_color=FIELD, border_color=BORDER, border_width=1, text_color=TEXT)
+        self.text.pack(fill="x", padx=16)
+        self.text.insert("1.0", t.text)
+
+        ctk.CTkLabel(box, text="Срок", font=f["small"], text_color=MUTED).pack(anchor="w", padx=16, pady=(12, 4))
+        row = ctk.CTkFrame(box, fg_color="transparent")
+        row.pack(fill="x", padx=16)
+        self.date_var = tk.StringVar(value=t.due_date.strftime("%d.%m.%Y"))
+        self.date_entry = ctk.CTkEntry(row, textvariable=self.date_var, width=120, height=36, corner_radius=10,
+                                       font=f["task"], fg_color=FIELD, border_color=BORDER, border_width=1,
+                                       text_color=TEXT, justify="center")
+        self.date_entry.pack(side="left")
+        self.date_entry.bind("<Return>", lambda e: self.save())
+        self.hint = ctk.CTkLabel(row, text="", font=f["meta"], text_color=MUTED)
+        self.hint.pack(side="left", padx=10)
+        self.date_var.trace_add("write", lambda *a: self._update_hint())
+
+        quick = ctk.CTkFrame(box, fg_color="transparent")
+        quick.pack(fill="x", padx=16, pady=(8, 0))
+        for label, days in self.QUICK:
+            ctk.CTkButton(quick, text=label, width=70, height=30, corner_radius=10, font=f["small"],
+                          fg_color=FIELD, hover_color=GHOST_HOVER, text_color=TEXT, border_width=1,
+                          border_color=BORDER,
+                          command=lambda d=days: self.date_var.set(
+                              (date.today() + timedelta(days=d)).strftime("%d.%m.%Y"))).pack(
+                side="left", padx=(0, 6))
+        ctk.CTkLabel(box, text="Можно писать словами: «20.11», «25 ноября», «в пятницу», «через 2 недели».",
+                     font=f["meta"], text_color=MUTED).pack(anchor="w", padx=16, pady=(6, 0))
+
+        btns = ctk.CTkFrame(box, fg_color="transparent")
+        btns.pack(fill="x", padx=16, pady=(14, 16))
+        ctk.CTkButton(btns, text="Сохранить", height=38, corner_radius=12, font=f["button"],
+                      fg_color=ACCENT, hover_color=ACCENT_HOVER, command=self.save).pack(
+            side="left", expand=True, fill="x", padx=(0, 6))
+        ctk.CTkButton(btns, text="Отмена", width=100, height=38, corner_radius=12, font=f["button"],
+                      fg_color="transparent", hover_color=GHOST_HOVER, text_color=TEXT,
+                      command=self.destroy).pack(side="left")
+
+        self.bind("<Escape>", lambda e: self.destroy())
+        self.bind("<Control-Return>", lambda e: self.save())
+        self._update_hint()
+        self.update_idletasks()
+        x = app.root.winfo_rootx() + 40 if app.root.winfo_viewable() else \
+            (self.winfo_screenwidth() - self.winfo_reqwidth()) // 2
+        y = app.root.winfo_rooty() + 60 if app.root.winfo_viewable() else \
+            (self.winfo_screenheight() - self.winfo_reqheight()) // 3
+        self.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+        self.after(150, lambda: self._focus(focus))
+
+    def _focus(self, what: str):
+        self.lift(); self.focus_force()
+        if what == "text":
+            self.text.focus_set(); self.text.mark_set("insert", "end-1c")
+        else:
+            self.date_entry.focus_set(); self.date_entry.select_range(0, "end")
+
+    def _parse(self) -> date | None:
+        try:
+            return core.parse_user_date(self.date_var.get())
+        except ValueError:
+            return None
+
+    def _update_hint(self):
+        d = self._parse()
+        if d is None:
+            self.hint.configure(text="⚠ не понял дату", text_color=RED)
+        else:
+            self.hint.configure(text=f"{WEEKDAYS[d.weekday()].lower()}, {pretty_date(d)}", text_color=MUTED)
+
+    def save(self):
+        text = " ".join(self.text.get("1.0", "end").split())
+        d = self._parse()
+        if not text:
+            self.text.focus_set()
+            return
+        if d is None:
+            self.date_entry.focus_set()
+            return
+        self.app.apply_edit(self.t.id, text, d)
+        self.destroy()
+
+
 class ReminderPopup(tk.Toplevel):
     WIDTH = 400
 
@@ -227,6 +330,11 @@ class ReminderPopup(tk.Toplevel):
         ctk.CTkButton(btns, text="ОК", width=64, height=38, corner_radius=12, font=f["button"],
                       fg_color="transparent", hover_color=GHOST_HOVER, text_color=TEXT,
                       command=self.close).pack(side="left")
+        ctk.CTkButton(card, text="📅  Перенести на другую дату / изменить", height=34, corner_radius=12,
+                      font=f["small"], fg_color="transparent", hover_color=GHOST_HOVER, text_color=ACCENT,
+                      border_width=1, border_color=BORDER,
+                      command=lambda: app.edit_task(t.id, "date")).pack(fill="x", padx=18, pady=(0, 16))
+        btns.pack_configure(pady=(14, 8))
 
         # перетаскивание мышью
         for w in (card, head):
@@ -466,11 +574,12 @@ class App:
         self.root.bind_all("<Control-KeyPress>", self._ctrl_key, add="+")
         for btn in (("<Button-2>", "<Button-3>") if pu.IS_MAC else ("<Button-3>",)):
             self.root.bind_class("Entry", btn, self._entry_menu, add="+")
+            self.root.bind_class("Text", btn, self._entry_menu, add="+")
         self.entry.bind("<<Paste>>", self._paste_main)
 
     def _ctrl_key(self, e):
         w = e.widget
-        if not isinstance(w, tk.Entry) or e.keysym.lower() in ("a", "c", "v", "x", "z"):
+        if not isinstance(w, (tk.Entry, tk.Text)) or e.keysym.lower() in ("a", "c", "v", "x", "z"):
             return None  # латиница — Tk справится сам
         ev = self._CYR_KEYS.get(e.keysym.lower())
         if ev is None and pu.IS_WIN:
@@ -478,10 +587,17 @@ class App:
         if ev is None:
             return None
         if ev == "<<SelectAll>>":
-            w.select_range(0, "end"); w.icursor("end")
+            self._select_all(w)
         else:
             w.event_generate(ev)
         return "break"
+
+    @staticmethod
+    def _select_all(w):
+        if isinstance(w, tk.Text):
+            w.tag_add("sel", "1.0", "end-1c"); w.mark_set("insert", "end-1c")
+        else:
+            w.select_range(0, "end"); w.icursor("end")
 
     def _entry_menu(self, e):
         w = e.widget
@@ -490,7 +606,7 @@ class App:
         for label, ev in (("Вырезать", "<<Cut>>"), ("Копировать", "<<Copy>>"), ("Вставить", "<<Paste>>")):
             m.add_command(label=label, command=lambda ev=ev: w.event_generate(ev))
         m.add_separator()
-        m.add_command(label="Выделить всё", command=lambda: (w.select_range(0, "end"), w.icursor("end")))
+        m.add_command(label="Выделить всё", command=lambda: self._select_all(w))
         try:
             m.tk_popup(e.x_root, e.y_root)
         finally:
@@ -632,25 +748,33 @@ class App:
         self._undo = None
         self.undo_btn.pack_forget()
 
-    def change_due(self, task_id: str):
+    def edit_task(self, task_id: str, focus: str = "date"):
         t = self.store.get(task_id)
         if not t:
             return
-        dlg = ctk.CTkInputDialog(title="Перенести срок",
-                                 text=f"«{t.text}»\n\nНовый срок (20.11.2026, завтра, в пятницу…):",
-                                 font=self.fonts["task"], button_fg_color=ACCENT,
-                                 button_hover_color=ACCENT_HOVER)
-        val = dlg.get_input()
-        if not val:
+        old = getattr(self, "_edit_dlg", None)
+        if old is not None and old.winfo_exists():
+            old.destroy()
+        self._edit_dlg = EditDialog(self, t, focus)
+
+    change_due = edit_task  # совместимость
+
+    def apply_edit(self, task_id: str, text: str, due: date):
+        t = self.store.get(task_id)
+        if not t:
             return
-        try:
-            t.due = core.parse_user_date(val).isoformat()
-        except ValueError:
-            self.set_status(f"⚠ Не понял дату «{val}».")
-            return
-        t.done, t.last_notified, t.snoozed_until = False, None, None
+        moved = t.due != due.isoformat()
+        t.text = text[:1].upper() + text[1:]
+        if moved:  # новый срок — напоминания начинаются заново
+            t.due = due.isoformat()
+            t.done, t.last_notified, t.snoozed_until = False, None, None
         self.store.save()
-        self.set_status(f"Срок перенесён на {pretty_date(t.due_date)}.")
+        log.info("изменена задача %s: %s до %s", t.id, t.text, t.due)
+        popup = self.open_popups.get(task_id)
+        if popup is not None:
+            popup.close()
+        self.set_status(f"✓ Срок перенесён на {pretty_date(t.due_date)} ({core.human_left(t, date.today())})."
+                        if moved else "✓ Задача изменена.")
         self.render_list(force=True)
 
     def toggle_autostart(self):
